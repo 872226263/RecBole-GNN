@@ -3,51 +3,34 @@ import torch.nn as nn
 from recbole.model.abstract_recommender import GeneralRecommender
 from recbole.model.loss import BPRLoss
 from recbole.utils import InputType
+from recbole_gnn.model.layers import LightGCNConv
 
-# Import necessary modules from XGCN
-from XGCN.model.module.propagation import LightGCN_Propagation
-from XGCN.model.module import init_emb_table, dot_product, bpr_loss, bce_loss
-from .module import RefNet
-
-class xGCN(GeneralRecommender):
+class xGCN(GeneralGraphRecommender):
     input_type = InputType.PAIRWISE
 
     def __init__(self, config, dataset):
         super(xGCN, self).__init__(config, dataset)
 
-        # Configuration and dataset handling
-        self.emb_table_device = config['emb_table_device']
-        self.forward_device = config['forward_device']
-        self.out_emb_table_device = config['out_emb_table_device']
-        self.num_nodes = dataset.num_nodes  # Assuming num_nodes is a dataset attribute
+        # load parameters info
+        self.latent_dim = config['embedding_size']  # int type:the embedding size of lightGCN
+        self.n_layers = config['n_layers']  # int type:the layer num of lightGCN
+        self.reg_weight = config['reg_weight']  # float32 type: the weight decay for l2 normalization
+        self.require_pow = config['require_pow']  # bool type: whether to require pow when regularization
 
-        # xGCN specific initializations
-        self.propagation = LightGCN_Propagation(config, dataset)
-        self.emb_table = init_emb_table(config, self.num_nodes, return_tensor=True)
+        # define layers and loss
+        self.user_embedding = nn.Embedding(num_embeddings=self.n_users, embedding_dim=self.latent_dim)
+        self.item_embedding = nn.Embedding(num_embeddings=self.n_items, embedding_dim=self.latent_dim)
+        self.gcn_conv = LightGCNConv(dim=self.latent_dim)
+        self.mf_loss = BPRLoss()
+        self.reg_loss = EmbLoss()
+
+        # Custom RefNet initialization
         self.create_refnet()
-        self.out_emb_table = torch.empty(self.emb_table.shape, dtype=torch.float32).to(self.out_emb_table_device)
-
-        # DataLoader for nodes
-        self.node_dl = torch.utils.data.DataLoader(torch.arange(self.num_nodes), batch_size=4096)
 
         # Optimizer
         self.optimizer = torch.optim.Adam([
             {'params': self.refnet.parameters(), 'lr': config['dnn_lr']},
         ])
-
-        # Additional attributes
-        self.epoch_last_prop = 0
-        self.total_prop_times = 0
-
-        # Loss function
-        self.loss_type = config['loss_type']
-        self.reg_weight = config['L2_reg_weight']
-        if self.loss_type not in ['bpr', 'bce']:
-            raise ValueError("Invalid loss type. Choose 'bpr' or 'bce'.")
-
-        # Propagation
-        if not config['from_pretrained']:
-            self.do_propagation()
 
     def create_refnet(self):
         dnn_arch = self.config['dnn_arch']
@@ -62,9 +45,9 @@ class xGCN(GeneralRecommender):
         return scores
 
     def calculate_loss(self, interaction):
-        user = interaction['user_id']
-        pos_item = interaction['pos_item_id']
-        neg_item = interaction['neg_item_id']
+        user = interaction[self.USER_ID]
+        pos_item = interaction[self.ITEM_ID]
+        neg_item = interaction[self.NEG_ITEM_ID]
 
         user_emb = self.get_refnet_output_emb(user)
         pos_item_emb = self.get_refnet_output_emb(pos_item)
